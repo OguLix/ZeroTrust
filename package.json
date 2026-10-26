@@ -1,0 +1,29 @@
+{
+  "name": "sistem-nilai",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Sistem Nilai dengan arsitektur Zero Trust (praktikum Keamanan Informasi KP70065004)",
+  "workspaces": [
+    "gateway",
+    "service-nilai",
+    "service-transkrip"
+  ],
+  "scripts": {
+    "db:init": "node db/init.js",
+    "db:seed": "node db/seed.js",
+    "start:gateway": "node gateway/server.js",
+    "start:nilai": "node service-nilai/server.js",
+    "start:transkrip": "node service-transkrip/server.js",
+    "dev": "concurrently -n gw,nilai,transkrip -c cyan,green,yellow \"npm run start:gateway\" \"npm run start:nilai\" \"npm run start:transkrip\"",
+    "smoke": "node scripts/smoke-test.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.3"
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

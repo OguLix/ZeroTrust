@@ -1,0 +1,1 @@
+// entrypoint Service Transkrip
