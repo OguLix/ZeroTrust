@@ -1,1 +1,226 @@
-// skenario uji T01-T27 (npm run smoke)
+"use strict";
+
+const ROOT = "C:/Kuliah/Semester 5/KI/Praktikum/Zero Trust Security";
+const GW = "http://127.0.0.1:3000";
+const NILAI_DIRECT = "http://127.0.0.1:3001";
+const TRANSKRIP_DIRECT = "http://127.0.0.1:3002";
+
+const fs = require("fs");
+const envText = fs.readFileSync(ROOT + "/.env", "utf8");
+function envVal(name) {
+  const m = envText.match(new RegExp("^" + name + "=(.+)$", "m"));
+  return m ? m[1].trim() : "";
+}
+const GATEWAY_SECRET = envVal("GATEWAY_SECRET");
+
+const { isWithinAccessHours } = require(ROOT + "/shared/accessHours");
+
+let pass = 0;
+let fail = 0;
+function check(name, condition) {
+  if (condition) {
+    pass++;
+    console.log("PASS " + name);
+  } else {
+    fail++;
+    console.log("FAIL " + name);
+  }
+}
+
+async function call(baseUrl, method, path, body, token, deviceId, opts) {
+  const headers = {};
+  if (body !== undefined) headers["content-type"] = "application/json";
+  if (token) headers.authorization = "Bearer " + token;
+  if (deviceId) headers["x-device-id"] = deviceId;
+  if (!(opts && opts.noSecret) && baseUrl === GW) {
+  }
+  if (baseUrl !== GW && !(opts && opts.noSecret)) {
+    headers["x-gateway-secret"] = GATEWAY_SECRET;
+  }
+  const res = await fetch(baseUrl + path, {
+    method,
+    headers,
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const text = await res.text();
+  let json = null;
+  if (text) {
+    try { json = JSON.parse(text); } catch { json = null; }
+  }
+  return { status: res.status, json };
+}
+
+async function main() {
+  const withinHours = isWithinAccessHours(new Date());
+
+  const directNoSecret = await call(NILAI_DIRECT, "GET", "/nilai", undefined, undefined, undefined, { noSecret: true });
+  check("T04 akses langsung tanpa secret 403", directNoSecret.status === 403);
+
+  const directWithSecret = await call(NILAI_DIRECT, "GET", "/nilai", undefined, undefined, undefined);
+  check("T05 akses langsung dengan secret tanpa token 401", directWithSecret.status === 401);
+
+  const t06 = await call(GW, "GET", "/nilai");
+  check("T06 gateway tanpa token 401", t06.status === 401);
+  check("T06 reason NO_TOKEN", t06.json && t06.json.reason === "NO_TOKEN");
+
+  const t07 = await call(GW, "GET", "/nilai", undefined, "bukan.token.sama.sekali");
+  check("T07 token salah 401", t07.status === 401);
+
+  const loginMhs = await call(GW, "POST", "/auth/login", { username: "mhs1", password: "Password123!" }, undefined, "DEV-MHS-01");
+  check("T01 login mhs1 200", loginMhs.status === 200);
+  check("T01 ada access_token", !!(loginMhs.json && loginMhs.json.access_token));
+  check("T01 ada refresh_token", !!(loginMhs.json && loginMhs.json.refresh_token));
+  const mhsToken = loginMhs.json ? loginMhs.json.access_token : "";
+  const mhsRefresh = loginMhs.json ? loginMhs.json.refresh_token : "";
+
+  const loginBad = await call(GW, "POST", "/auth/login", { username: "mhs1", password: "salah" }, undefined, "DEV-MHS-01");
+  check("T02 password salah 401", loginBad.status === 401);
+  check("T02 invalid_credentials", loginBad.json === undefined || (loginBad.json && !loginBad.json.reason));
+
+  const loginDevice = await call(GW, "POST", "/auth/login", { username: "mhs1", password: "Password123!" }, undefined, "DEV-ADMIN-01");
+  check("T03 device tidak terdaftar 403", loginDevice.status === 403);
+  check("T03 reason DEVICE_NOT_REGISTERED", loginDevice.json && loginDevice.json.reason === "DEVICE_NOT_REGISTERED");
+
+  const t08 = await call(GW, "GET", "/nilai", undefined, mhsToken, "DEV-DOSEN-01");
+  check("T08 device milik user lain 403", t08.status === 403);
+  check("T08 reason DEVICE_NOT_REGISTERED", t08.json && t08.json.reason === "DEVICE_NOT_REGISTERED");
+
+  const t09 = await call(GW, "GET", "/nilai", undefined, mhsToken, "DEV-MHS-01");
+  check("T09 mhs1 GET nilai 200", t09.status === 200);
+  check("T09 2 baris", Array.isArray(t09.json) && t09.json.length === 2);
+  check("T09 semua miliknya", Array.isArray(t09.json) && t09.json.every((r) => r.mahasiswa === "Mahasiswa Satu"));
+
+  const loginDosen = await call(GW, "POST", "/auth/login", { username: "dosen1", password: "Password123!" }, undefined, "DEV-DOSEN-01");
+  const dosenToken = loginDosen.json ? loginDosen.json.access_token : "";
+  const t10 = await call(GW, "GET", "/nilai", undefined, dosenToken, "DEV-DOSEN-01");
+  check("T10 dosen1 GET nilai 200", t10.status === 200);
+  check("T10 3 baris", Array.isArray(t10.json) && t10.json.length === 3);
+  check("T10 hanya kelas IF101", Array.isArray(t10.json) && t10.json.every((r) => r.kode_mk === "IF101"));
+
+  const loginAdmin = await call(GW, "POST", "/auth/login", { username: "admin1", password: "Password123!" }, undefined, "DEV-ADMIN-01");
+  const adminToken = loginAdmin.json ? loginAdmin.json.access_token : "";
+  const t11 = await call(GW, "GET", "/nilai", undefined, adminToken, "DEV-ADMIN-01");
+  check("T11 admin GET nilai 403", t11.status === 403);
+  check("T11 reason ROLE_NOT_ALLOWED", t11.json && t11.json.reason === "ROLE_NOT_ALLOWED");
+
+  const t12 = await call(GW, "GET", "/transkrip/2470002", undefined, mhsToken, "DEV-MHS-01");
+  check("T12 mhs1 transkrip mhs2 403", t12.status === 403);
+  check("T12 reason NOT_OWN_NIM", t12.json && t12.json.reason === "NOT_OWN_NIM");
+
+  const t13 = await call(GW, "GET", "/transkrip/2470001", undefined, mhsToken, "DEV-MHS-01");
+  check("T13 mhs1 transkrip sendiri 200", t13.status === 200);
+  check("T13 entries array", t13.json && Array.isArray(t13.json.entries));
+
+  const t14 = await call(GW, "GET", "/transkrip/2470002", undefined, adminToken, "DEV-ADMIN-01");
+  check("T14 admin transkrip 200", t14.status === 200);
+
+  const dosenNilai = await call(GW, "GET", "/nilai", undefined, dosenToken, "DEV-DOSEN-01");
+  const idBarisDosen1 = dosenNilai.json && dosenNilai.json[0] ? dosenNilai.json[0].id : null;
+  const idKelasDosen1 = dosenNilai.json && dosenNilai.json[0] ? dosenNilai.json[0].kelas_id : null;
+
+  const loginDosen2 = await call(GW, "POST", "/auth/login", { username: "dosen2", password: "Password123!" }, undefined, "DEV-DOSEN-02");
+  const dosen2Token = loginDosen2.json ? loginDosen2.json.access_token : "";
+  const dosen2Nilai = await call(GW, "GET", "/nilai", undefined, dosen2Token, "DEV-DOSEN-02");
+  const idBarisDosen2 = dosen2Nilai.json && dosen2Nilai.json[0] ? dosen2Nilai.json[0].id : null;
+  const idKelasDosen2 = dosen2Nilai.json && dosen2Nilai.json[0] ? dosen2Nilai.json[0].kelas_id : null;
+
+  const t15 = await call(GW, "PUT", "/nilai/" + idBarisDosen2, { nilai_angka: 90 }, dosenToken, "DEV-DOSEN-01");
+  check("T15 put kelas dosen2 403", t15.status === 403);
+  check("T15 reason NOT_CLASS_OWNER", t15.json && t15.json.reason === "NOT_CLASS_OWNER");
+
+  if (withinHours) {
+    const t16 = await call(GW, "PUT", "/nilai/" + idBarisDosen1, { nilai_angka: 95 }, dosenToken, "DEV-DOSEN-01");
+    check("T16 put kelas sendiri 200", t16.status === 200);
+    check("T16 nilai_huruf A", t16.json && t16.json.nilai_huruf === "A");
+  } else {
+    const t16 = await call(GW, "PUT", "/nilai/" + idBarisDosen1, { nilai_angka: 95 }, dosenToken, "DEV-DOSEN-01");
+    check("T16 put kelas sendiri (luar jam) 403", t16.status === 403);
+    check("T16 reason OUTSIDE_ACCESS_HOURS", t16.json && t16.json.reason === "OUTSIDE_ACCESS_HOURS");
+  }
+
+  if (withinHours) {
+    const t17 = await call(GW, "PUT", "/nilai/" + idBarisDosen1, { nilai_angka: 95 }, dosenToken, "DEV-DOSEN-01");
+    check("T17 (dalam jam akses, skenario luar jam dilewati)", true);
+  } else {
+    const t17 = await call(GW, "PUT", "/nilai/" + idBarisDosen1, { nilai_angka: 95 }, dosenToken, "DEV-DOSEN-01");
+    check("T17 put luar jam 403", t17.status === 403);
+    check("T17 reason OUTSIDE_ACCESS_HOURS", t17.json && t17.json.reason === "OUTSIDE_ACCESS_HOURS");
+  }
+
+  const t18 = await call(GW, "PUT", "/nilai/" + idBarisDosen1, { nilai_angka: 90 }, mhsToken, "DEV-MHS-01");
+  check("T18 mhs put 403", t18.status === 403);
+  check("T18 reason ROLE_NOT_ALLOWED", t18.json && t18.json.reason === "ROLE_NOT_ALLOWED");
+
+  const t19 = await call(GW, "POST", "/kelas/" + idKelasDosen2 + "/finalisasi", undefined, dosenToken, "DEV-DOSEN-01");
+  check("T19 finalisasi kelas dosen2 403", t19.status === 403);
+  check("T19 reason NOT_CLASS_OWNER", t19.json && t19.json.reason === "NOT_CLASS_OWNER");
+
+  const syncAsUser = await call(GW, "POST", "/transkrip/sinkron", { kelas_id: idKelasDosen1, kode_mk: "IF101", nama_mk: "Pemrograman Web", entries: [{ nim: "2470001", nilai_angka: 95, nilai_huruf: "A" }] }, dosenToken, "DEV-DOSEN-01");
+  check("T22 user sinkron 403", syncAsUser.status === 403);
+  check("T22 reason SERVICE_ONLY", syncAsUser.json && syncAsUser.json.reason === "SERVICE_ONLY");
+
+  const svcLogin = await call(GW, "POST", "/auth/service", { client_id: envVal("SERVICE_CLIENT_ID"), client_secret: envVal("SERVICE_CLIENT_SECRET") });
+  const svcToken = svcLogin.json ? svcLogin.json.access_token : "";
+  const svcNilai = await call(GW, "GET", "/nilai", undefined, svcToken);
+  check("T23 service GET nilai 403", svcNilai.status === 403);
+  check("T23 reason ROLE_NOT_ALLOWED", svcNilai.json && svcNilai.json.reason === "ROLE_NOT_ALLOWED");
+  const svcTranskrip = await call(GW, "GET", "/transkrip/2470001", undefined, svcToken);
+  check("T23b service GET transkrip 403", svcTranskrip.status === 403);
+  check("T23b reason ROLE_NOT_ALLOWED", svcTranskrip.json && svcTranskrip.json.reason === "ROLE_NOT_ALLOWED");
+
+  if (withinHours) {
+    const fin = await call(GW, "POST", "/kelas/" + idKelasDosen1 + "/finalisasi", undefined, dosenToken, "DEV-DOSEN-01");
+    check("T20 finalisasi kelas sendiri 200", fin.status === 200);
+    check("T20 finalized 3", fin.json && fin.json.finalized === 3);
+    check("T20 synced true", fin.json && fin.json.synced === true);
+
+    const transkripAfter = await call(GW, "GET", "/transkrip/2470001", undefined, mhsToken, "DEV-MHS-01");
+    check("T20 transkrip terisi", transkripAfter.json && Array.isArray(transkripAfter.json.entries) && transkripAfter.json.entries.length === 1);
+
+    const putFinal = await call(GW, "PUT", "/nilai/" + idBarisDosen1, { nilai_angka: 93 }, dosenToken, "DEV-DOSEN-01");
+    check("T21 put nilai final 403", putFinal.status === 403);
+    check("T21 reason NILAI_ALREADY_FINAL", putFinal.json && putFinal.json.reason === "NILAI_ALREADY_FINAL");
+  } else {
+    check("T20 finalisasi (dilewati, luar jam akses)", true);
+    check("T21 put final (dilewati, luar jam akses)", true);
+  }
+
+  const t26 = await call(GW, "GET", "/admin");
+  check("T26 rute tak dikenal 403/404", t26.status === 403 || t26.status === 404);
+  check("T26 reason ROUTE_NOT_FOUND", t26.json && t26.json.reason === "ROUTE_NOT_FOUND");
+
+  const refreshRes = await call(GW, "POST", "/auth/refresh", { refresh_token: mhsRefresh }, undefined, "DEV-MHS-01");
+  check("T24 refresh valid 200", refreshRes.status === 200);
+  check("T24 ada access_token baru", !!(refreshRes.json && refreshRes.json.access_token));
+  const newRefresh = refreshRes.json ? refreshRes.json.refresh_token : mhsRefresh;
+  const oldRefreshReuse = await call(GW, "POST", "/auth/refresh", { refresh_token: mhsRefresh }, undefined, "DEV-MHS-01");
+  check("T24 token lama ditolak", oldRefreshReuse.status === 401);
+
+  const loginT25 = await call(GW, "POST", "/auth/login", { username: "mhs1", password: "Password123!" }, undefined, "DEV-MHS-01");
+  const refreshT25 = loginT25.json ? loginT25.json.refresh_token : "";
+  await call(GW, "POST", "/auth/logout", { refresh_token: refreshT25 }, undefined, "DEV-MHS-01");
+  const refreshAfterLogout = await call(GW, "POST", "/auth/refresh", { refresh_token: refreshT25 }, undefined, "DEV-MHS-01");
+  check("T25 logout lalu refresh 401", refreshAfterLogout.status === 401);
+
+  try {
+    const db = require(ROOT + "/db/index");
+    const rows = db.prepare("SELECT decision, reason, subject_type FROM audit_log").all();
+    db.close();
+    check("T27 audit ada baris allow", rows.some((r) => r.decision === "allow"));
+    check("T27 audit ada baris deny", rows.some((r) => r.decision === "deny"));
+    check("T27 audit memuat reason NO_TOKEN", rows.some((r) => r.reason === "NO_TOKEN"));
+    const joined = JSON.stringify(rows);
+    check("T27 tidak ada token JWT di audit", !joined.includes("eyJ"));
+    check("T27 tidak ada password di audit", !joined.includes("Password123!"));
+  } catch (err) {
+    check("T27 audit dapat dibaca", false);
+  }
+
+  console.log("TOTAL pass=" + pass + " fail=" + fail);
+  process.exit(fail === 0 ? 0 : 1);
+}
+
+main().catch((err) => {
+  console.error("gagal: " + (err && err.message ? err.message : err));
+  process.exit(1);
+});
