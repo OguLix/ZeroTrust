@@ -112,6 +112,41 @@ curl -s http://127.0.0.1:3000/nilai \
 
 Detail tiap skenario (T01-T27) ada di `docs/test-scenarios.md`.
 
+## Skenario smoke test
+
+Script otomatis `scripts/smoke-test.js` (`npm run smoke`) menjalankan semua skenario ini
+dan mencetak PASS/FAIL/SKIP per asersi.
+
+| ID | Skenario | Hasil yang diharapkan |
+|---|---|---|
+| T01 | Login `mhs1` benar dengan `DEV-MHS-01` | 200, ada access dan refresh token |
+| T02 | Login password salah | 401 `invalid_credentials` |
+| T03 | Login benar tapi device tidak terdaftar | 403 `DEVICE_NOT_REGISTERED` |
+| T04 | Akses langsung `:3001` dan `:3002` tanpa secret | 403 `GATEWAY_SECRET_INVALID` |
+| T05 | Akses langsung ke service dengan secret benar tapi tanpa token | 401 `NO_TOKEN` |
+| T06 | Request ke gateway tanpa token | 401 `NO_TOKEN` |
+| T07 | Token kedaluwarsa atau tanda tangan salah | 401 `TOKEN_EXPIRED` atau `INVALID_TOKEN` |
+| T08 | Token valid tapi `X-Device-ID` milik user lain | 403 `DEVICE_NOT_REGISTERED` |
+| T09 | `mhs1` `GET /nilai` | 200, hanya baris miliknya |
+| T10 | `dosen1` `GET /nilai` | 200, hanya kelas IF101 |
+| T11 | `admin1` `GET /nilai` | 403 `ROLE_NOT_ALLOWED` |
+| T12 | `mhs1` `GET /transkrip/2470002` | 403 `NOT_OWN_NIM` |
+| T13 | `mhs1` `GET /transkrip/2470001` | 200 |
+| T14 | `admin1` `GET /transkrip/2470002` | 200 |
+| T15 | `dosen1` `PUT /nilai/:id` untuk nilai di kelas `dosen2` | 403 `NOT_CLASS_OWNER` |
+| T16 | `dosen1` `PUT /nilai/:id` untuk nilai di kelas sendiri, dalam jam akses | 200 |
+| T17 | Sama dengan T16 di luar jam akses | 403 `OUTSIDE_ACCESS_HOURS` |
+| T18 | `mhs1` `PUT /nilai/:id` | 403 `ROLE_NOT_ALLOWED` |
+| T19 | `dosen1` finalisasi kelas `dosen2` | 403 `NOT_CLASS_OWNER` |
+| T20 | `dosen1` finalisasi kelas sendiri, dalam jam akses | 200, nilai `final`, transkrip terisi |
+| T21 | `dosen1` `PUT /nilai/:id` pada nilai yang sudah final | 403 `NILAI_ALREADY_FINAL` |
+| T22 | Token user (dosen, admin) memanggil `POST /transkrip/sinkron` | 403 `SERVICE_ONLY` |
+| T23 | Token service memanggil `GET /nilai` atau `GET /transkrip/:nim` | 403 `ROLE_NOT_ALLOWED` |
+| T24 | Refresh dengan token valid | 200, token baru; token lama lalu ditolak |
+| T25 | Logout lalu refresh dengan token tadi | 401 |
+| T26 | Rute tidak dikenal, misalnya `GET /admin` | 403 atau 404 `ROUTE_NOT_FOUND` |
+| T27 | Setelah semua skenario, `audit_log` memuat baris allow dan deny dengan alasan, tanpa token atau password | terpenuhi |
+
 ## Mengubah jam akses (demo)
 
 Ubah `ACCESS_HOUR_START` dan `ACCESS_HOUR_END` di `.env` (format 0-23, start < end),

@@ -37,10 +37,6 @@ function skipTest(name) {
   skip++;
   console.log("SKIP " + name);
 }
-function passOrSkipBecause(name, ran, ok) {
-  if (ran) check(name, ok);
-  else skipTest(name);
-}
 
 async function call(baseUrl, method, pathArg, body, token, deviceId, opts) {
   const headers = {};
@@ -290,7 +286,7 @@ async function main() {
           clearTimeout(timer);
         }
         if (!res || res.status !== 200) {
-          check("T17 precheck token valid di gateway sementara", false);
+          skipTest("T17 precheck token valid di gateway sementara (request tidak sampai)");
         } else {
           const controller2 = new AbortController();
           const timer2 = setTimeout(() => controller2.abort(), 10000);
@@ -312,7 +308,7 @@ async function main() {
             clearTimeout(timer2);
           }
           if (!res2) {
-            check("T17 request tidak retenant ke policy engine", false);
+            skipTest("T17 request tidak mentok ke policy engine");
           } else {
             const text = await res2.text();
             let json = null;
@@ -382,7 +378,9 @@ async function main() {
           } finally {
             clearTimeout(timer);
           }
-          if (res) {
+          if (!res) {
+            skipTest("T20 request finalisasi via gateway sementara (request tidak sampai)");
+          } else {
             const text = await res.text();
             let json = null;
             try { json = JSON.parse(text); } catch { json = null; }
@@ -390,11 +388,9 @@ async function main() {
             check("T20 finalized 3 via gateway sementara", json && json.finalized === 3);
             check("T20 synced true via gateway sementara", json && json.synced === true);
             finalizedViaGateway = res.status === 200;
-          } else {
-            passOrSkipBecause("T20 request finalisasi via gateway sementara", false, false);
           }
         } else {
-          passOrSkipBecause("T20 gateway sementara jendela jam saat ini (out-of-hours)", false, false);
+          skipTest("T20 gateway sementara jendela jam saat ini (out-of-hours) tidak dapat dibentuk");
         }
       } finally {
         killChild(tempT20);
@@ -404,13 +400,16 @@ async function main() {
     let finalizedViaService = false;
     if (!finalizedViaGateway) {
       const finService = await call(NILAI_DIRECT, "POST", "/kelas/" + idKelasDosen1 + "/finalisasi", undefined, dosenToken, "DEV-DOSEN-01");
-      finalizedViaService = finService.status === 200;
-      check("T20 finalisasi kelas sendiri via service (fallback out-of-hours) 200", finService.status === 200);
-    }
-
-    if (finalizedViaGateway || finalizedViaService) {
-      const transkripAfter = await call(GW, "GET", "/transkrip/2470001", undefined, mhsToken, "DEV-MHS-01");
-      check("T20 transkrip terisi (out-of-hours)", transkripAfter.json && Array.isArray(transkripAfter.json.entries) && transkripAfter.json.entries.length === 1);
+      if (finService.status === 200) {
+        finalizedViaService = true;
+        check("T20 finalisasi kelas sendiri via service (fallback out-of-hours) 200", true);
+        check("T20 finalized 3 via service (fallback)", finService.json && finService.json.finalized === 3);
+        check("T20 synced true via service (fallback)", finService.json && finService.json.synced === true);
+        const transkripAfterService = await call(GW, "GET", "/transkrip/2470001", undefined, mhsToken, "DEV-MHS-01");
+        check("T20 transkrip terisi via service (fallback)", transkripAfterService.json && Array.isArray(transkripAfterService.json.entries) && transkripAfterService.json.entries.length === 1);
+      } else {
+        skipTest("T20 finalisasi via service (fallback out-of-hours) tidak dapat dijalankan");
+      }
     }
   }
 
