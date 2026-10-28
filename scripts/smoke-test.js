@@ -1,19 +1,22 @@
 "use strict";
 
-const ROOT = "C:/Kuliah/Semester 5/KI/Praktikum/Zero Trust Security";
+const path = require("path");
+const { spawn } = require("child_process");
+
+const ROOT = path.resolve(__dirname, "..");
 const GW = "http://127.0.0.1:3000";
 const NILAI_DIRECT = "http://127.0.0.1:3001";
 const TRANSKRIP_DIRECT = "http://127.0.0.1:3002";
 
 const fs = require("fs");
-const envText = fs.readFileSync(ROOT + "/.env", "utf8");
+const envText = fs.readFileSync(path.join(ROOT, ".env"), "utf8");
 function envVal(name) {
   const m = envText.match(new RegExp("^" + name + "=(.+)$", "m"));
   return m ? m[1].trim() : "";
 }
 const GATEWAY_SECRET = envVal("GATEWAY_SECRET");
 
-const { isWithinAccessHours } = require(ROOT + "/shared/accessHours");
+const { isWithinAccessHours } = require(path.join(ROOT, "shared", "accessHours"));
 
 let pass = 0;
 let fail = 0;
@@ -27,17 +30,15 @@ function check(name, condition) {
   }
 }
 
-async function call(baseUrl, method, path, body, token, deviceId, opts) {
+async function call(baseUrl, method, pathArg, body, token, deviceId, opts) {
   const headers = {};
   if (body !== undefined) headers["content-type"] = "application/json";
   if (token) headers.authorization = "Bearer " + token;
   if (deviceId) headers["x-device-id"] = deviceId;
-  if (!(opts && opts.noSecret) && baseUrl === GW) {
-  }
   if (baseUrl !== GW && !(opts && opts.noSecret)) {
     headers["x-gateway-secret"] = GATEWAY_SECRET;
   }
-  const res = await fetch(baseUrl + path, {
+  const res = await fetch(baseUrl + pathArg, {
     method,
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -50,14 +51,72 @@ async function call(baseUrl, method, path, body, token, deviceId, opts) {
   return { status: res.status, json };
 }
 
+function selectHours() {
+  const hour = new Date().getHours();
+  if (hour === 0) return { start: "1", end: "2" };
+  return { start: "0", end: "1" };
+}
+
+function killChild(child) {
+  if (!child || typeof child.pid !== "number") return;
+  if (process.platform === "win32") {
+    try {
+      spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+    } catch { }
+  } else {
+    child.kill("SIGTERM");
+  }
+}
+
+function spawnGatewayTemporary(hours) {
+  const env = Object.assign({}, process.env, {
+    PORT_GATEWAY: "3099",
+    ACCESS_HOUR_START: hours.start,
+    ACCESS_HOUR_END: hours.end,
+  });
+  const child = spawn(process.execPath, ["gateway/server.js"], {
+    cwd: ROOT,
+    env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  return child;
+}
+
+function waitForStartup(child, timeoutMs) {
+  const limit = timeoutMs || 10000;
+  return new Promise((resolve) => {
+    let settled = false;
+    let buffer = "";
+    const timer = setTimeout(() => finish(false), limit);
+    function finish(ok) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.removeAllListeners("exit");
+      child.stdout.removeAllListeners("data");
+      resolve(ok);
+    }
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      buffer += chunk;
+      if (buffer.indexOf("berjalan di 127.0.0.1:3099") !== -1) finish(true);
+    });
+    child.on("exit", () => finish(false));
+  });
+}
+
 async function main() {
   const withinHours = isWithinAccessHours(new Date());
 
-  const directNoSecret = await call(NILAI_DIRECT, "GET", "/nilai", undefined, undefined, undefined, { noSecret: true });
-  check("T04 akses langsung tanpa secret 403", directNoSecret.status === 403);
+  const directNoSecretNilai = await call(NILAI_DIRECT, "GET", "/nilai", undefined, undefined, undefined, { noSecret: true });
+  check("T04 akses langsung service nilai tanpa secret 403", directNoSecretNilai.status === 403);
+  const directNoSecretTranskrip = await call(TRANSKRIP_DIRECT, "GET", "/transkrip/2470001", undefined, undefined, undefined, { noSecret: true });
+  check("T04 akses langsung service transkrip tanpa secret 403", directNoSecretTranskrip.status === 403);
 
-  const directWithSecret = await call(NILAI_DIRECT, "GET", "/nilai", undefined, undefined, undefined);
-  check("T05 akses langsung dengan secret tanpa token 401", directWithSecret.status === 401);
+  const directWithSecretNilai = await call(NILAI_DIRECT, "GET", "/nilai", undefined, undefined, undefined);
+  check("T05 service nilai secret tanpa token 401", directWithSecretNilai.status === 401);
+  const directWithSecretTranskrip = await call(TRANSKRIP_DIRECT, "GET", "/transkrip/2470001", undefined, undefined, undefined);
+  check("T05 service transkrip secret tanpa token 401", directWithSecretTranskrip.status === 401);
 
   const t06 = await call(GW, "GET", "/nilai");
   check("T06 gateway tanpa token 401", t06.status === 401);
@@ -65,6 +124,7 @@ async function main() {
 
   const t07 = await call(GW, "GET", "/nilai", undefined, "bukan.token.sama.sekali");
   check("T07 token salah 401", t07.status === 401);
+  check("T07 reason INVALID_TOKEN", t07.json && t07.json.reason === "INVALID_TOKEN");
 
   const loginMhs = await call(GW, "POST", "/auth/login", { username: "mhs1", password: "Password123!" }, undefined, "DEV-MHS-01");
   check("T01 login mhs1 200", loginMhs.status === 200);
@@ -75,7 +135,8 @@ async function main() {
 
   const loginBad = await call(GW, "POST", "/auth/login", { username: "mhs1", password: "salah" }, undefined, "DEV-MHS-01");
   check("T02 password salah 401", loginBad.status === 401);
-  check("T02 invalid_credentials", loginBad.json === undefined || (loginBad.json && !loginBad.json.reason));
+  check("T02 invalid_credentials", !!(loginBad.json && loginBad.json.error === "invalid_credentials"));
+  check("T02 tanpa access_token", !(loginBad.json && loginBad.json.access_token));
 
   const loginDevice = await call(GW, "POST", "/auth/login", { username: "mhs1", password: "Password123!" }, undefined, "DEV-ADMIN-01");
   check("T03 device tidak terdaftar 403", loginDevice.status === 403);
@@ -138,13 +199,43 @@ async function main() {
     check("T16 reason OUTSIDE_ACCESS_HOURS", t16.json && t16.json.reason === "OUTSIDE_ACCESS_HOURS");
   }
 
-  if (withinHours) {
-    const t17 = await call(GW, "PUT", "/nilai/" + idBarisDosen1, { nilai_angka: 95 }, dosenToken, "DEV-DOSEN-01");
-    check("T17 (dalam jam akses, skenario luar jam dilewati)", true);
-  } else {
-    const t17 = await call(GW, "PUT", "/nilai/" + idBarisDosen1, { nilai_angka: 95 }, dosenToken, "DEV-DOSEN-01");
-    check("T17 put luar jam 403", t17.status === 403);
-    check("T17 reason OUTSIDE_ACCESS_HOURS", t17.json && t17.json.reason === "OUTSIDE_ACCESS_HOURS");
+  const hours = selectHours();
+  const tempGateway = spawnGatewayTemporary(hours);
+  const ready = await waitForStartup(tempGateway);
+  try {
+    if (!ready) {
+      check("T17 gateway sementara gagal berjalan", false);
+    } else {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 10000);
+      let res;
+      try {
+        res = await fetch(GW.replace(":3000", ":3099") + "/nilai/" + idBarisDosen1, {
+          method: "PUT",
+          headers: {
+            "content-type": "application/json",
+            authorization: "Bearer " + dosenToken,
+            "x-device-id": "DEV-DOSEN-01",
+          },
+          body: JSON.stringify({ nilai_angka: 95 }),
+          signal: controller.signal,
+        });
+      } catch (err) {
+        check("T17 request ditolak sebelum policy engine", false);
+        res = null;
+      } finally {
+        clearTimeout(timer);
+      }
+      if (res) {
+        const text = await res.text();
+        let json = null;
+        try { json = JSON.parse(text); } catch { json = null; }
+        check("T17 put luar jam 403", res.status === 403);
+        check("T17 reason OUTSIDE_ACCESS_HOURS", json && json.reason === "OUTSIDE_ACCESS_HOURS");
+      }
+    }
+  } finally {
+    killChild(tempGateway);
   }
 
   const t18 = await call(GW, "PUT", "/nilai/" + idBarisDosen1, { nilai_angka: 90 }, mhsToken, "DEV-MHS-01");
@@ -181,8 +272,11 @@ async function main() {
     check("T21 put nilai final 403", putFinal.status === 403);
     check("T21 reason NILAI_ALREADY_FINAL", putFinal.json && putFinal.json.reason === "NILAI_ALREADY_FINAL");
   } else {
-    check("T20 finalisasi (dilewati, luar jam akses)", true);
-    check("T21 put final (dilewati, luar jam akses)", true);
+    const fin = await call(GW, "POST", "/kelas/" + idKelasDosen1 + "/finalisasi", undefined, dosenToken, "DEV-DOSEN-01");
+    check("T20 finalisasi kelas sendiri (luar jam) 403", fin.status === 403);
+    check("T20 reason OUTSIDE_ACCESS_HOURS", fin.json && fin.json.reason === "OUTSIDE_ACCESS_HOURS");
+    check("T21 put final (tidak dijalankan, sistem luar jam)", false);
+    check("T21 reason NILAI_ALREADY_FINAL (tidak dijalankan)", false);
   }
 
   const t26 = await call(GW, "GET", "/admin");
@@ -203,7 +297,7 @@ async function main() {
   check("T25 logout lalu refresh 401", refreshAfterLogout.status === 401);
 
   try {
-    const db = require(ROOT + "/db/index");
+    const db = require(path.join(ROOT, "db", "index"));
     const rows = db.prepare("SELECT decision, reason, subject_type FROM audit_log").all();
     db.close();
     check("T27 audit ada baris allow", rows.some((r) => r.decision === "allow"));
