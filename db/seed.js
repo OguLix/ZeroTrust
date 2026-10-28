@@ -33,6 +33,7 @@ const seedAll = db.transaction(() => {
   db.prepare("DELETE FROM kelas").run();
   db.prepare("DELETE FROM devices").run();
   db.prepare("DELETE FROM refresh_tokens").run();
+  db.prepare("DELETE FROM transkrip").run();
   db.prepare("DELETE FROM users").run();
   db.prepare("DELETE FROM service_clients").run();
 

@@ -1,6 +1,6 @@
 # Skenario Uji (versi curl) — untuk demo
 
-Versi curl dari skenario T01-T27 (Bagian 12 AGENT.md) untuk video demo. Script
+Versi curl dari skenario T01-T27 untuk video demo. Script
 otomatisnya ada di `scripts/smoke-test.js` (`npm run smoke`).
 
 Sistem harus sudah berjalan (`npm run dev`) dengan data seed (`npm run db:init` lalu

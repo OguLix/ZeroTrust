@@ -115,9 +115,10 @@ Detail tiap skenario (T01-T27) ada di `docs/test-scenarios.md`.
 ## Mengubah jam akses (demo)
 
 Ubah `ACCESS_HOUR_START` dan `ACCESS_HOUR_END` di `.env` (format 0-23, start < end),
-lalu restart gateway. Contoh untuk demo di luar jam akses: set `ACCESS_HOUR_START=7`,
-`ACCESS_HOUR_END=8` bila jam sekarang 10, sehingga PUT/finalisasi ditolak dengan
-`OUTSIDE_ACCESS_HOURS`.
+lalu restart gateway. Zona waktu pembacaan jam akses pakai `ACCESS_TZ` (default
+`Asia/Jakarta`); pastikan nilai `ACCESS_TZ` sesuai lingkungan demo. Contoh untuk demo
+di luar jam akses: set `ACCESS_HOUR_START=7`, `ACCESS_HOUR_END=8` bila jam di
+`ACCESS_TZ` saat itu 10, sehingga PUT/finalisasi ditolak dengan `OUTSIDE_ACCESS_HOURS`.
 
 ## Peta kebutuhan (Bagian 4 tugas) ke file/fungsi
 

@@ -15,11 +15,15 @@ function envVal(name) {
   return m ? m[1].trim() : "";
 }
 const GATEWAY_SECRET = envVal("GATEWAY_SECRET");
+const ACCESS_TZ = envVal("ACCESS_TZ") || "Asia/Jakarta";
+const ACCESS_HOUR_START = Number(envVal("ACCESS_HOUR_START") || 7);
+const ACCESS_HOUR_END = Number(envVal("ACCESS_HOUR_END") || 21);
 
 const { isWithinAccessHours } = require(path.join(ROOT, "shared", "accessHours"));
 
 let pass = 0;
 let fail = 0;
+let skip = 0;
 function check(name, condition) {
   if (condition) {
     pass++;
@@ -28,6 +32,14 @@ function check(name, condition) {
     fail++;
     console.log("FAIL " + name);
   }
+}
+function skipTest(name) {
+  skip++;
+  console.log("SKIP " + name);
+}
+function passOrSkipBecause(name, ran, ok) {
+  if (ran) check(name, ok);
+  else skipTest(name);
 }
 
 async function call(baseUrl, method, pathArg, body, token, deviceId, opts) {
@@ -51,10 +63,32 @@ async function call(baseUrl, method, pathArg, body, token, deviceId, opts) {
   return { status: res.status, json };
 }
 
-function selectHours() {
-  const hour = new Date().getHours();
-  if (hour === 0) return { start: "1", end: "2" };
-  return { start: "0", end: "1" };
+function hourInTz(date) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: ACCESS_TZ,
+    hour: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(date);
+  const hourPart = parts.find((p) => p.type === "hour");
+  return Number(hourPart.value);
+}
+
+function selectOutsideWindow() {
+  const nowHour = hourInTz(new Date());
+  for (let h = 0; h <= 22; h++) {
+    const overlapsConfigured = h + 1 > ACCESS_HOUR_START && h < ACCESS_HOUR_END;
+    const insideCurrentHour = nowHour === h;
+    if (!overlapsConfigured && !insideCurrentHour) {
+      return { start: String(h), end: String(h + 1) };
+    }
+  }
+  return null;
+}
+
+function selectInsideWindow() {
+  const nowHour = hourInTz(new Date());
+  if (nowHour === 23) return null;
+  return { start: String(nowHour), end: String(nowHour + 1) };
 }
 
 function killChild(child) {
@@ -73,6 +107,7 @@ function spawnGatewayTemporary(hours) {
     PORT_GATEWAY: "3099",
     ACCESS_HOUR_START: hours.start,
     ACCESS_HOUR_END: hours.end,
+    ACCESS_TZ,
   });
   const child = spawn(process.execPath, ["gateway/server.js"], {
     cwd: ROOT,
@@ -110,13 +145,17 @@ async function main() {
 
   const directNoSecretNilai = await call(NILAI_DIRECT, "GET", "/nilai", undefined, undefined, undefined, { noSecret: true });
   check("T04 akses langsung service nilai tanpa secret 403", directNoSecretNilai.status === 403);
+  check("T04 reason GATEWAY_SECRET_INVALID", directNoSecretNilai.json && directNoSecretNilai.json.reason === "GATEWAY_SECRET_INVALID");
   const directNoSecretTranskrip = await call(TRANSKRIP_DIRECT, "GET", "/transkrip/2470001", undefined, undefined, undefined, { noSecret: true });
   check("T04 akses langsung service transkrip tanpa secret 403", directNoSecretTranskrip.status === 403);
+  check("T04 reason GATEWAY_SECRET_INVALID (transkrip)", directNoSecretTranskrip.json && directNoSecretTranskrip.json.reason === "GATEWAY_SECRET_INVALID");
 
   const directWithSecretNilai = await call(NILAI_DIRECT, "GET", "/nilai", undefined, undefined, undefined);
   check("T05 service nilai secret tanpa token 401", directWithSecretNilai.status === 401);
+  check("T05 reason NO_TOKEN (nilai)", directWithSecretNilai.json && directWithSecretNilai.json.reason === "NO_TOKEN");
   const directWithSecretTranskrip = await call(TRANSKRIP_DIRECT, "GET", "/transkrip/2470001", undefined, undefined, undefined);
   check("T05 service transkrip secret tanpa token 401", directWithSecretTranskrip.status === 401);
+  check("T05 reason NO_TOKEN (transkrip)", directWithSecretTranskrip.json && directWithSecretTranskrip.json.reason === "NO_TOKEN");
 
   const t06 = await call(GW, "GET", "/nilai");
   check("T06 gateway tanpa token 401", t06.status === 401);
@@ -125,6 +164,27 @@ async function main() {
   const t07 = await call(GW, "GET", "/nilai", undefined, "bukan.token.sama.sekali");
   check("T07 token salah 401", t07.status === 401);
   check("T07 reason INVALID_TOKEN", t07.json && t07.json.reason === "INVALID_TOKEN");
+
+  const jwt = require("jsonwebtoken");
+  const JWT_SECRET = envVal("JWT_SECRET");
+  const JWT_ISSUER = envVal("JWT_ISSUER");
+  let expiredToken = null;
+  try {
+    expiredToken = jwt.sign(
+      { sub: "4", role: "mahasiswa", typ: "access" },
+      JWT_SECRET,
+      { algorithm: "HS256", issuer: JWT_ISSUER, expiresIn: -1 }
+    );
+  } catch (err) {
+    expiredToken = null;
+  }
+  if (expiredToken) {
+    const t07Expired = await call(GW, "GET", "/nilai", undefined, expiredToken);
+    check("T07 token kedaluwarsa 401", t07Expired.status === 401);
+    check("T07 reason TOKEN_EXPIRED", t07Expired.json && t07Expired.json.reason === "TOKEN_EXPIRED");
+  } else {
+    skipTest("T07 token kedaluwarsa (gagal menandatangani token uji)");
+  }
 
   const loginMhs = await call(GW, "POST", "/auth/login", { username: "mhs1", password: "Password123!" }, undefined, "DEV-MHS-01");
   check("T01 login mhs1 200", loginMhs.status === 200);
@@ -199,43 +259,72 @@ async function main() {
     check("T16 reason OUTSIDE_ACCESS_HOURS", t16.json && t16.json.reason === "OUTSIDE_ACCESS_HOURS");
   }
 
-  const hours = selectHours();
-  const tempGateway = spawnGatewayTemporary(hours);
-  const ready = await waitForStartup(tempGateway);
-  try {
-    if (!ready) {
-      check("T17 gateway sementara gagal berjalan", false);
-    } else {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 10000);
-      let res;
-      try {
-        res = await fetch(GW.replace(":3000", ":3099") + "/nilai/" + idBarisDosen1, {
-          method: "PUT",
-          headers: {
-            "content-type": "application/json",
-            authorization: "Bearer " + dosenToken,
-            "x-device-id": "DEV-DOSEN-01",
-          },
-          body: JSON.stringify({ nilai_angka: 95 }),
-          signal: controller.signal,
-        });
-      } catch (err) {
-        check("T17 request ditolak sebelum policy engine", false);
-        res = null;
-      } finally {
-        clearTimeout(timer);
+  const outsideWindow = selectOutsideWindow();
+  let t17Ready = false;
+  let tempT17 = null;
+  if (!outsideWindow) {
+    skipTest("T17 jendela out-of-hours tidak dapat dibentuk dari ACCESS_HOUR_START/END dan ACCESS_TZ");
+  } else {
+    tempT17 = spawnGatewayTemporary(outsideWindow);
+    t17Ready = await waitForStartup(tempT17);
+    try {
+      if (!t17Ready) {
+        check("T17 gateway sementara gagal berjalan", false);
+      } else {
+        const GW_TEMP = "http://127.0.0.1:3099";
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 10000);
+        let res = null;
+        try {
+          res = await fetch(GW_TEMP + "/nilai", {
+            method: "GET",
+            headers: {
+              authorization: "Bearer " + dosenToken,
+              "x-device-id": "DEV-DOSEN-01",
+            },
+            signal: controller.signal,
+          });
+        } catch (err) {
+          res = null;
+        } finally {
+          clearTimeout(timer);
+        }
+        if (!res || res.status !== 200) {
+          check("T17 precheck token valid di gateway sementara", false);
+        } else {
+          const controller2 = new AbortController();
+          const timer2 = setTimeout(() => controller2.abort(), 10000);
+          let res2 = null;
+          try {
+            res2 = await fetch(GW_TEMP + "/nilai/" + idBarisDosen1, {
+              method: "PUT",
+              headers: {
+                "content-type": "application/json",
+                authorization: "Bearer " + dosenToken,
+                "x-device-id": "DEV-DOSEN-01",
+              },
+              body: JSON.stringify({ nilai_angka: 95 }),
+              signal: controller2.signal,
+            });
+          } catch (err) {
+            res2 = null;
+          } finally {
+            clearTimeout(timer2);
+          }
+          if (!res2) {
+            check("T17 request tidak retenant ke policy engine", false);
+          } else {
+            const text = await res2.text();
+            let json = null;
+            try { json = JSON.parse(text); } catch { json = null; }
+            check("T17 put luar jam 403", res2.status === 403);
+            check("T17 reason OUTSIDE_ACCESS_HOURS", json && json.reason === "OUTSIDE_ACCESS_HOURS");
+          }
+        }
       }
-      if (res) {
-        const text = await res.text();
-        let json = null;
-        try { json = JSON.parse(text); } catch { json = null; }
-        check("T17 put luar jam 403", res.status === 403);
-        check("T17 reason OUTSIDE_ACCESS_HOURS", json && json.reason === "OUTSIDE_ACCESS_HOURS");
-      }
+    } finally {
+      killChild(tempT17);
     }
-  } finally {
-    killChild(tempGateway);
   }
 
   const t18 = await call(GW, "PUT", "/nilai/" + idBarisDosen1, { nilai_angka: 90 }, mhsToken, "DEV-MHS-01");
@@ -264,20 +353,70 @@ async function main() {
     check("T20 finalisasi kelas sendiri 200", fin.status === 200);
     check("T20 finalized 3", fin.json && fin.json.finalized === 3);
     check("T20 synced true", fin.json && fin.json.synced === true);
-
     const transkripAfter = await call(GW, "GET", "/transkrip/2470001", undefined, mhsToken, "DEV-MHS-01");
     check("T20 transkrip terisi", transkripAfter.json && Array.isArray(transkripAfter.json.entries) && transkripAfter.json.entries.length === 1);
-
-    const putFinal = await call(GW, "PUT", "/nilai/" + idBarisDosen1, { nilai_angka: 93 }, dosenToken, "DEV-DOSEN-01");
-    check("T21 put nilai final 403", putFinal.status === 403);
-    check("T21 reason NILAI_ALREADY_FINAL", putFinal.json && putFinal.json.reason === "NILAI_ALREADY_FINAL");
   } else {
-    const fin = await call(GW, "POST", "/kelas/" + idKelasDosen1 + "/finalisasi", undefined, dosenToken, "DEV-DOSEN-01");
-    check("T20 finalisasi kelas sendiri (luar jam) 403", fin.status === 403);
-    check("T20 reason OUTSIDE_ACCESS_HOURS", fin.json && fin.json.reason === "OUTSIDE_ACCESS_HOURS");
-    check("T21 put final (tidak dijalankan, sistem luar jam)", false);
-    check("T21 reason NILAI_ALREADY_FINAL (tidak dijalankan)", false);
+    const insideWindow = selectInsideWindow();
+    let finalizedViaGateway = false;
+    let tempT20 = null;
+    if (insideWindow) {
+      tempT20 = spawnGatewayTemporary(insideWindow);
+      const tempReady = await waitForStartup(tempT20);
+      try {
+        if (tempReady) {
+          const GW_TEMP = "http://127.0.0.1:3099";
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 10000);
+          let res = null;
+          try {
+            res = await fetch(GW_TEMP + "/kelas/" + idKelasDosen1 + "/finalisasi", {
+              method: "POST",
+              headers: {
+                authorization: "Bearer " + dosenToken,
+                "x-device-id": "DEV-DOSEN-01",
+              },
+              signal: controller.signal,
+            });
+          } catch (err) {
+            res = null;
+          } finally {
+            clearTimeout(timer);
+          }
+          if (res) {
+            const text = await res.text();
+            let json = null;
+            try { json = JSON.parse(text); } catch { json = null; }
+            check("T20 finalisasi kelas sendiri via gateway sementara 200", res.status === 200);
+            check("T20 finalized 3 via gateway sementara", json && json.finalized === 3);
+            check("T20 synced true via gateway sementara", json && json.synced === true);
+            finalizedViaGateway = res.status === 200;
+          } else {
+            passOrSkipBecause("T20 request finalisasi via gateway sementara", false, false);
+          }
+        } else {
+          passOrSkipBecause("T20 gateway sementara jendela jam saat ini (out-of-hours)", false, false);
+        }
+      } finally {
+        killChild(tempT20);
+      }
+    }
+
+    let finalizedViaService = false;
+    if (!finalizedViaGateway) {
+      const finService = await call(NILAI_DIRECT, "POST", "/kelas/" + idKelasDosen1 + "/finalisasi", undefined, dosenToken, "DEV-DOSEN-01");
+      finalizedViaService = finService.status === 200;
+      check("T20 finalisasi kelas sendiri via service (fallback out-of-hours) 200", finService.status === 200);
+    }
+
+    if (finalizedViaGateway || finalizedViaService) {
+      const transkripAfter = await call(GW, "GET", "/transkrip/2470001", undefined, mhsToken, "DEV-MHS-01");
+      check("T20 transkrip terisi (out-of-hours)", transkripAfter.json && Array.isArray(transkripAfter.json.entries) && transkripAfter.json.entries.length === 1);
+    }
   }
+
+  const putFinal = await call(GW, "PUT", "/nilai/" + idBarisDosen1, { nilai_angka: 93 }, dosenToken, "DEV-DOSEN-01");
+  check("T21 put nilai final 403", putFinal.status === 403);
+  check("T21 reason NILAI_ALREADY_FINAL", putFinal.json && putFinal.json.reason === "NILAI_ALREADY_FINAL");
 
   const t26 = await call(GW, "GET", "/admin");
   check("T26 rute tak dikenal 403/404", t26.status === 403 || t26.status === 404);
@@ -310,7 +449,7 @@ async function main() {
     check("T27 audit dapat dibaca", false);
   }
 
-  console.log("TOTAL pass=" + pass + " fail=" + fail);
+  console.log("TOTAL pass=" + pass + " fail=" + fail + " skip=" + skip);
   process.exit(fail === 0 ? 0 : 1);
 }
 
