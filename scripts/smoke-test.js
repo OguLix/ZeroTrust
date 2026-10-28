@@ -347,8 +347,6 @@ async function main() {
   check("T23b reason ROLE_NOT_ALLOWED", svcTranskrip.json && svcTranskrip.json.reason === "ROLE_NOT_ALLOWED");
 
   let finalizationOk = false;
-  let finalizedViaGateway = false;
-  let finalizedViaService = false;
   if (withinHours) {
     const fin = await call(GW, "POST", "/kelas/" + idKelasDosen1 + "/finalisasi", undefined, dosenToken, "DEV-DOSEN-01");
     check("T20 finalisasi kelas sendiri 200", fin.status === 200);
@@ -392,7 +390,7 @@ async function main() {
             check("T20 finalisasi kelas sendiri via gateway sementara 200", res.status === 200);
             check("T20 finalized 3 via gateway sementara", json && json.finalized === 3);
             check("T20 synced true via gateway sementara", json && json.synced === true);
-            finalizedViaGateway = res.status === 200;
+            finalizationOk = res.status === 200 && !!json && json.finalized === 3 && json.synced === true;
           }
         } else {
           skipTest("T20 gateway sementara jendela jam saat ini (out-of-hours) tidak dapat dibentuk");
@@ -402,14 +400,13 @@ async function main() {
       }
     }
 
-    if (!finalizedViaGateway) {
+    if (!finalizationOk) {
       const finService = await call(NILAI_DIRECT, "POST", "/kelas/" + idKelasDosen1 + "/finalisasi", undefined, dosenToken, "DEV-DOSEN-01");
       if (finService.status === 200) {
-        finalizedViaService = true;
         check("T20 finalisasi kelas sendiri via service (fallback out-of-hours, bukan uji kebijakan gateway) 200", true);
         check("T20 finalized 3 via service (fallback, bukan uji kebijakan gateway)", finService.json && finService.json.finalized === 3);
         check("T20 synced true via service (fallback, bukan uji kebijakan gateway)", finService.json && finService.json.synced === true);
-        finalizationOk = !!(finService.json && finService.json.finalized === 3 && finService.json.synced === true);
+        finalizationOk = finService.status === 200 && !!finService.json && finService.json.finalized === 3 && finService.json.synced === true;
         const transkripAfterService = await call(GW, "GET", "/transkrip/2470001", undefined, mhsToken, "DEV-MHS-01");
         check("T20 transkrip terisi via service (fallback, bukan uji kebijakan gateway)", transkripAfterService.json && Array.isArray(transkripAfterService.json.entries) && transkripAfterService.json.entries.length === 1);
       } else {
@@ -418,9 +415,8 @@ async function main() {
     }
   }
 
-  finalizationOk = finalizationOk || finalizedViaGateway || finalizedViaService;
   if (!finalizationOk) {
-    skipTest("T21 tidak dijalankan karena finalisasi sebelumnya belum berhasil");
+    skipTest("T21 tidak dijalankan karena finalisasi tervalidasi belum berhasil");
   } else {
     const putFinal = await call(GW, "PUT", "/nilai/" + idBarisDosen1, { nilai_angka: 93 }, dosenToken, "DEV-DOSEN-01");
     check("T21 put nilai final 403", putFinal.status === 403);
@@ -455,7 +451,20 @@ async function main() {
     check("T27 tidak ada token JWT di audit", !joined.includes("eyJ"));
     check("T27 tidak ada password di audit", !joined.includes("Password123!"));
   } catch (err) {
-    skipTest("T27 audit tidak dapat dibaca dari database (kegagalan lingkungan)");
+    const code = err && err.code ? err.code : "";
+    const message = err && err.message ? err.message : "";
+    const environmentFailure =
+      code.indexOf("SQLITE_") === 0 ||
+      message.indexOf("SQLITE_") !== -1 ||
+      message.indexOf("ENOENT") !== -1 ||
+      message.indexOf("EBUSY") !== -1 ||
+      message.indexOf("FILE_MISSING") !== -1 ||
+      message.indexOf("Cannot find module") !== -1;
+    if (environmentFailure) {
+      skipTest("T27 audit tidak dapat dibaca dari database (kegagalan lingkungan: " + (code || message) + ")");
+    } else {
+      check("T27 audit dapat dibaca (error tidak terduga: " + (code || message) + ")", false);
+    }
   }
 
   console.log("TOTAL pass=" + pass + " fail=" + fail + " skip=" + skip);
